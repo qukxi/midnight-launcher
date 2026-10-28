@@ -1,0 +1,40 @@
+/* Motion stays on opacity/transform; no layout animation or JavaScript loops. */
+:root { --ease-out: cubic-bezier(.2,.75,.25,1); --ease-spring: cubic-bezier(.2,.85,.3,1.12); }
+.page { animation: screen-arrive 260ms var(--ease-out) both; }
+@keyframes screen-arrive { from { opacity: 0; transform: translateY(9px); } to { opacity: 1; transform: translateY(0); } }
+.app[data-gradient=true]::before { animation: midnight-drift 24s ease-in-out infinite alternate; }
+@keyframes midnight-drift { from { transform: translate3d(-1%,-1%,0) scale(1.04); } to { transform: translate3d(1%,1%,0) scale(1.06); } }
+.bottom-bar nav { position: relative; isolation: isolate; }
+.bottom-bar nav::before { content: ''; position: absolute; z-index: -1; top: 8px; left: 8px; width: 40px; height: 40px; border-radius: 50%; background: var(--rose); box-shadow: 0 0 18px color-mix(in srgb,var(--rose) 14%,transparent); transform: translateX(calc(var(--nav-index, 0) * 48px)); transition: transform 320ms var(--ease-spring), background-color 220ms; pointer-events: none; }
+.bottom-bar nav button { background: transparent; position: relative; transition: color 160ms, translate 180ms var(--ease-out); }
+.bottom-bar nav button.active { background: transparent; box-shadow: none; }
+.bottom-bar nav button:hover { translate: 0 -2px; filter: none; }
+.bottom-bar nav button:active { translate: 0 1px; }
+.bottom-bar nav button svg { transition: scale 220ms var(--ease-spring); }
+.bottom-bar nav button.active svg { scale: 1.08; }
+.launch-button { transition: background-color 200ms, box-shadow 220ms, scale 180ms var(--ease-out), translate 200ms var(--ease-out); }
+.launch-button:hover:not(:disabled) { transform: none; translate: 0 -2px; box-shadow: 0 12px 38px color-mix(in srgb,var(--rose) 20%,transparent); }
+.launch-button:active:not(:disabled) { translate: 0 0; scale: .985; }
+.launch-button[aria-busy=true] { animation: launch-breathe 2s ease-in-out infinite; }
+@keyframes launch-breathe { 0%,100% { opacity: .65; } 50% { opacity: .95; } }
+.instance-card { animation: card-arrive 340ms var(--ease-out) both; animation-delay: calc(var(--card-order,0) * 35ms); transition: border-color 200ms, translate 220ms var(--ease-out), box-shadow 220ms; }
+@keyframes card-arrive { from { opacity: 0; transform: translateY(12px) scale(.99); } to { opacity: 1; transform: translateY(0) scale(1); } }
+@media(hover:hover) { .instance-card:hover { translate: 0 -3px; box-shadow: 0 12px 28px #0002; } }
+.primary, .secondary, .theme-choice, .dropdown-trigger { transition: background-color 160ms, border-color 160ms, box-shadow 160ms, scale 140ms var(--ease-out); }
+.primary:active:not(:disabled), .secondary:active:not(:disabled), .theme-choice:active { scale: .975; }
+.midnight-dropdown-menu { animation: menu-arrive 160ms var(--ease-out) both; transform-origin: center; }
+@keyframes menu-arrive { from { opacity: 0; transform: translateY(-4px) scale(.985); } to { opacity: 1; transform: translateY(0) scale(1); } }
+.midnight-dropdown-option { transition: background-color 100ms, color 100ms; }
+dialog[open] { animation: dialog-arrive 220ms var(--ease-out) both; }
+dialog[open]::backdrop { animation: backdrop-arrive 180ms ease-out both; }
+@keyframes dialog-arrive { from { opacity: 0; transform: translateY(10px) scale(.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
+@keyframes backdrop-arrive { from { opacity: 0; } to { opacity: 1; } }
+.notice, .operation-panel { animation: screen-arrive 200ms var(--ease-out) both; }
+.instance-editor, .offline-account { animation: screen-arrive 220ms var(--ease-out) both; }
+/* Portal menus live outside .app, so the document carries the motion preference. */
+html[data-reduce-motion=true] *, html[data-reduce-motion=true] *::before, html[data-reduce-motion=true] *::after, html[data-reduce-motion=true] *::backdrop { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+html[data-reduce-motion=true] .bottom-bar nav button, html[data-reduce-motion=true] .instance-card, html[data-reduce-motion=true] .launch-button { translate: none !important; scale: none !important; }
+@media(prefers-reduced-motion:reduce) {
+  *, *::before, *::after, *::backdrop { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+  .bottom-bar nav button, .instance-card, .launch-button { translate: none !important; scale: none !important; }
+}

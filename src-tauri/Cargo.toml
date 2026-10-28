@@ -1,0 +1,34 @@
+[package]
+name = "midnight-launcher"
+version = "0.2.0"
+description = "Midnight Launcher — desktop Minecraft Java launcher scaffold"
+authors = ["Midnight Launcher contributors"]
+edition = "2021"
+rust-version = "1.99"
+
+[lib]
+name = "midnight_launcher_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+tokio = { version = "1", features = ["fs", "sync", "time", "process", "io-util", "rt-multi-thread", "macros"] }
+sha1 = "0.10"
+md5 = "0.7"
+
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4"] }
+futures-util = "0.3"
+flate2 = "1"
+tar = "0.4"
+keyring = { version = "3.6.3", features = ["apple-native", "windows-native"] }
+tauri-plugin-opener = "2"
+
+[dev-dependencies]
+http = "1"
