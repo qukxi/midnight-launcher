@@ -15,7 +15,7 @@ The current development build targets macOS Apple Silicon. Windows and Linux sup
 
 ## Minecraft API access
 
-Application (client) ID: `6b0fede0-1318-4335-908d-a668b7599747`
+
 
 API access is requested to complete Microsoft sign-in, verify Minecraft Java Edition ownership, and retrieve player profiles. Credentials are entered on Microsoft websites; Midnight does not collect Microsoft passwords. Refresh tokens use macOS Keychain.
 
