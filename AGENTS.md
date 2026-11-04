@@ -1,5 +1,12 @@
 # Repository Guidelines
 
+## Continuing after reinstall
+
+Read `HANDOFF.md` for the project snapshot, backup locations, verification limits,
+and continuation context recorded on 2026-11-04. Check newer changes before
+treating that snapshot as current. `VERIFICATION.md` contains historical entries;
+prefer the latest dated evidence when older statements conflict.
+
 ## Project Structure & Module Organization
 
 - `src/` contains React/TypeScript UI, IPC wrappers (`api.ts`), persisted state (`model.ts`), translations (`i18n.ts`), and CSS. Keep theme tokens in `theme.css` and responsive layout in `layout.css`.
