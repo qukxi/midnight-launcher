@@ -1,7 +1,10 @@
 import { themes } from './themes';
 import type { Theme } from './themes';
 export type { Theme } from './themes';
-export interface Instance { id: string; name: string; version: string; loader?: { kind: 'fabric'; version: string }; memory?: number; javaPath?: string; accent?: 'rose' | 'purple' | 'graphite' }
+export const horizonVersion = '0.2.97';
+export type LoaderKind = 'fabric' | 'forge' | 'neoforge';
+export const loaderName = (kind: LoaderKind) => ({ fabric: 'Fabric', forge: 'Forge', neoforge: 'NeoForge' })[kind];
+export interface Instance { id: string; name: string; version: string; engine?: 'java' | 'horizon'; loader?: { kind: LoaderKind; version: string }; memory?: number; javaPath?: string; accent?: 'rose' | 'purple' | 'graphite'; modpack?: { projectId: string; versionId: string; versionName: string } }
 export type Language = 'ru' | 'en';
 export interface Settings { language: Language; theme: Theme; gradient: boolean; memory: number; javaPath: string; clientId: string; reduceMotion: boolean; offlineName?: string; minimizeOnLaunch?: boolean; restoreOnExit?: boolean }
 export interface SavedState { instances: Instance[]; selected: string; settings: Settings }
@@ -12,6 +15,12 @@ export const initialState: SavedState = {
   settings: { language: 'ru', theme: 'rose', gradient: true, memory: 4096, javaPath: '', clientId: defaultClientId, reduceMotion: false }
 };
 export const storageKey = 'midnight-launcher:v1';
+export function connectHorizon(state: SavedState, id: string): SavedState {
+  const existing = state.instances.find(instance => instance.engine === 'horizon');
+  if (existing) return { ...state, selected: existing.id };
+  if (state.instances.length >= 100) throw new Error('Достигнут лимит: 100 инстансов.');
+  return { ...state, selected: id, instances: [...state.instances, { id, name: 'Horizon · Rust', version: horizonVersion, engine: 'horizon', accent: 'purple' }] };
+}
 export function validateInstance(name: string, version: string): string | null {
   if (!name.trim() || name.trim().length > 40) return 'Название должно содержать от 1 до 40 символов.';
   if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(version)) return 'Укажите корректный ID версии, например 1.21.1.';
@@ -34,9 +43,12 @@ export function restoreState(raw: string | null): SavedState {
     if (!x.settings.clientId.trim()) x.settings.clientId = defaultClientId;
     if (typeof x.settings.offlineName !== 'string' || !/^[A-Za-z0-9_]{1,16}$/.test(x.settings.offlineName)) delete x.settings.offlineName;
     for (const instance of x.instances) {
-      if (instance.loader !== undefined && (instance.loader?.kind !== 'fabric' || typeof instance.loader?.version !== 'string' || !/^[A-Za-z0-9._+-]{1,64}$/.test(instance.loader.version))) return structuredClone(initialState);
+      if (instance.engine !== undefined && !['java', 'horizon'].includes(instance.engine)) return structuredClone(initialState);
+      if (instance.engine === 'horizon' && (instance.loader !== undefined || instance.version !== horizonVersion)) return structuredClone(initialState);
+      if (instance.loader !== undefined && (!['fabric', 'forge', 'neoforge'].includes(instance.loader?.kind) || typeof instance.loader?.version !== 'string' || !/^[A-Za-z0-9._+-]{1,64}$/.test(instance.loader.version))) return structuredClone(initialState);
     }
     for (const i of x.instances) {
+      if (i.modpack !== undefined && (!i.modpack || typeof i.modpack.projectId !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(i.modpack.projectId) || typeof i.modpack.versionId !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(i.modpack.versionId) || typeof i.modpack.versionName !== 'string' || i.modpack.versionName.length > 120)) delete i.modpack;
       if (!Number.isInteger(i.memory) || i.memory < 1024 || i.memory > 16384) delete i.memory;
       if (typeof i.javaPath !== 'string') delete i.javaPath;
       if (!['rose', 'purple', 'graphite'].includes(i.accent)) delete i.accent;

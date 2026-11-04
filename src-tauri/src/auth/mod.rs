@@ -18,6 +18,35 @@ pub struct AuthState {
 pub struct AuthManager {
     pending: Option<Pending>,
     session: Option<Session>,
+    diagnostics: Option<AuthDiagnostics>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthDiagnostics {
+    client_id: String,
+    attempts: Vec<AuthAttempt>,
+}
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AuthAttempt {
+    endpoint: &'static str,
+    http_status: u16,
+    error_code: Option<String>,
+}
+impl AuthDiagnostics {
+    fn new(client: &str) -> Self {
+        Self {
+            client_id: Uuid::parse_str(client)
+                .map(|id| id.to_string())
+                .unwrap_or_else(|_| "invalid".into()),
+            attempts: Vec::new(),
+        }
+    }
+}
+// This contains public application metadata and local error codes, never identity responses.
+pub fn diagnostics(manager: &AuthManager) -> Option<AuthDiagnostics> {
+    manager.diagnostics.clone()
 }
 struct Pending {
     uri: String,
@@ -28,6 +57,7 @@ struct Pending {
     next_poll: Instant,
     interval: u64,
 }
+#[derive(Clone)]
 pub struct Session {
     pub profile: Profile,
     pub token: String,
@@ -146,8 +176,9 @@ async fn response(reply: reqwest::Response, step: &str) -> Result<Value, String>
         }
         bytes.extend_from_slice(&chunk);
     }
-    let value: Value =
-        serde_json::from_slice(&bytes).map_err(|_| format!("AUTH_{step}_INVALID_RESPONSE"))?;
+    let parsed = serde_json::from_slice::<Value>(&bytes);
+    // Preserve HTTP errors even if a gateway returns HTML or an empty body.
+    let value = parsed.as_ref().unwrap_or(&Value::Null);
     if !status.is_success() {
         if step == "MICROSOFT" {
             let code = value["error"].as_str().unwrap_or("unknown");
@@ -174,14 +205,84 @@ async fn response(reply: reqwest::Response, step: &str) -> Result<Value, String>
             });
         }
         if step == "MINECRAFT" && status.as_u16() == 403 {
-            return Err("AUTH_MINECRAFT_APP_APPROVAL_REQUIRED".into());
+            let registration_rejected = ["error", "errorMessage", "message"].iter().any(|field| {
+                value[*field].as_str().is_some_and(|s| {
+                    let message = s.trim().trim_end_matches('.');
+                    message.eq_ignore_ascii_case("Invalid app registration")
+                        || message.eq_ignore_ascii_case("InvalidAppRegistration")
+                })
+            });
+            return Err(if registration_rejected {
+                "AUTH_MINECRAFT_APP_APPROVAL_REQUIRED"
+            } else {
+                "AUTH_MINECRAFT_FORBIDDEN"
+            }
+            .into());
         }
         if step == "PROFILE" && status.as_u16() == 404 {
             return Err("AUTH_MINECRAFT_PROFILE_REQUIRED".into());
         }
         return Err(format!("AUTH_{step}_HTTP_{}", status.as_u16()));
     }
-    Ok(value)
+    parsed.map_err(|_| format!("AUTH_{step}_INVALID_RESPONSE"))
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum MinecraftLoginRoute {
+    Launcher,
+    Xbox,
+}
+impl MinecraftLoginRoute {
+    fn url(self) -> &'static str {
+        match self {
+            Self::Launcher => "https://api.minecraftservices.com/launcher/login",
+            Self::Xbox => "https://api.minecraftservices.com/authentication/login_with_xbox",
+        }
+    }
+    fn body(self, uhs: &str, token: &str) -> Value {
+        let identity = format!("XBL3.0 x={uhs};{token}");
+        match self {
+            Self::Launcher => json!({"xtoken": identity, "platform": "PC_LAUNCHER"}),
+            Self::Xbox => json!({"identityToken": identity}),
+        }
+    }
+}
+async fn exchange_minecraft<F, Fut>(
+    mut send: F,
+    cancelled: &AtomicBool,
+    diagnostics: &mut AuthDiagnostics,
+) -> Result<Value, String>
+where
+    F: FnMut(MinecraftLoginRoute) -> Fut,
+    Fut: std::future::Future<Output = Result<reqwest::Response, reqwest::Error>>,
+{
+    for route in [MinecraftLoginRoute::Launcher, MinecraftLoginRoute::Xbox] {
+        check_cancelled(cancelled)?;
+        let reply = send(route).await.map_err(|_| "AUTH_MINECRAFT_NETWORK")?;
+        let status = reply.status().as_u16();
+        let result = response(reply, "MINECRAFT").await;
+        diagnostics.attempts.push(AuthAttempt {
+            endpoint: route.url(),
+            http_status: status,
+            error_code: result.as_ref().err().cloned(),
+        });
+        check_cancelled(cancelled)?;
+        // Try the standard Xbox exchange with the same identity when the launcher route
+        // is unavailable or gives an unspecified denial. Explicit registration rejection
+        // and all other errors stay authoritative; neither route skips ownership checks.
+        if route == MinecraftLoginRoute::Launcher
+            && (matches!(status, 404 | 405)
+                || status == 403
+                    && result
+                        .as_ref()
+                        .err()
+                        .is_some_and(|e| e == "AUTH_MINECRAFT_FORBIDDEN"))
+        {
+            continue;
+        }
+        return result;
+    }
+    Err("AUTH_MINECRAFT_FORBIDDEN".into())
 }
 fn field(value: &Value, name: &str) -> Result<String, String> {
     value[name]
@@ -198,6 +299,7 @@ pub async fn begin(manager: &mut AuthManager, client_id: &str) -> Result<DeviceP
     if !valid_client_id(client_id) {
         return Err("AUTH_CLIENT_ID_REQUIRED".into());
     }
+    manager.diagnostics = None;
     if manager
         .pending
         .as_ref()
@@ -316,6 +418,7 @@ pub async fn poll(
         }
         Ok(tokens) => {
             manager.pending = None;
+            manager.diagnostics = Some(AuthDiagnostics::new(&client));
             let refresh = field(&tokens, "refresh_token")?;
             // Persist the rotating refresh token before later exchanges, even if they fail.
             save(&Saved {
@@ -323,7 +426,14 @@ pub async fn poll(
                 refresh: refresh.clone(),
                 profile: None,
             })?;
-            let session = match minecraft(&tokens, &client, cancelled).await {
+            let session = match minecraft(
+                &tokens,
+                &client,
+                cancelled,
+                manager.diagnostics.as_mut().unwrap(),
+            )
+            .await
+            {
                 Ok(session) => session,
                 Err(error) => {
                     if cancelled.load(Ordering::Relaxed) {
@@ -351,6 +461,7 @@ async fn minecraft(
     tokens: &Value,
     client: &str,
     cancelled: &AtomicBool,
+    diagnostics: &mut AuthDiagnostics,
 ) -> Result<Session, String> {
     check_cancelled(cancelled)?;
     let http = http()?;
@@ -364,15 +475,15 @@ async fn minecraft(
     let uhs = field(claims, "uhs")?;
     let xuid = claims["xid"].as_str().unwrap_or("").to_string();
     let xsts_token = field(&xsts, "Token")?;
-    let mc = response(
-        http.post("https://api.minecraftservices.com/launcher/login")
-            .json(
-                &json!({"xtoken":format!("XBL3.0 x={uhs};{xsts_token}"),"platform":"PC_LAUNCHER"}),
-            )
-            .send()
-            .await
-            .map_err(|_| "AUTH_MINECRAFT_NETWORK")?,
-        "MINECRAFT",
+    let mc = exchange_minecraft(
+        |route| {
+            http.post(route.url())
+                .header(reqwest::header::ACCEPT, "application/json")
+                .json(&route.body(&uhs, &xsts_token))
+                .send()
+        },
+        cancelled,
+        diagnostics,
     )
     .await?;
     check_cancelled(cancelled)?;
@@ -405,13 +516,7 @@ async fn minecraft(
         id: field(&profile, "id")?,
         name: field(&profile, "name")?,
     };
-    if Uuid::parse_str(&profile.id).is_err()
-        || profile.name.len() > 16
-        || !profile
-            .name
-            .bytes()
-            .all(|c| c.is_ascii_alphanumeric() || c == b'_')
-    {
+    if !valid_java_profile(&profile) {
         return Err("AUTH_PROFILE_INVALID".into());
     }
     let lifetime = mc["expires_in"]
@@ -439,6 +544,51 @@ pub fn profile(manager: &AuthManager) -> Result<Option<Profile>, String> {
     // Startup inspection must never read Keychain or trigger a system password prompt.
     Ok(None)
 }
+fn valid_java_profile(profile: &Profile) -> bool {
+    Uuid::parse_str(&profile.id).is_ok_and(|id| !id.is_nil())
+        && (1..=16).contains(&profile.name.len())
+        && profile
+            .name
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'_')
+}
+fn verified_offline_account(manager: &AuthManager, cached: Option<&Saved>) -> Option<Profile> {
+    if let Some(session) = &manager.session {
+        if valid_client_id(&session.client)
+            && !session.token.is_empty()
+            && session.token != "0"
+            && valid_java_profile(&session.profile)
+        {
+            return Some(session.profile.clone());
+        }
+    }
+    // Saved.profile is written only after Minecraft ownership and profile checks succeed.
+    let cached = cached?;
+    if !valid_client_id(&cached.client) || cached.refresh.is_empty() {
+        return None;
+    }
+    cached
+        .profile
+        .as_ref()
+        .filter(|p| valid_java_profile(p))
+        .cloned()
+}
+/// Local proof of an earlier successful Minecraft sign-in; never refreshes tokens or uses the network.
+/// Called on account-page access or an explicit offline action, not during startup inspection.
+pub fn offline_account(manager: &AuthManager) -> Result<Option<Profile>, String> {
+    if let Some(profile) = verified_offline_account(manager, None) {
+        return Ok(Some(profile));
+    }
+    let cached = saved()?;
+    Ok(verified_offline_account(manager, cached.as_ref()))
+}
+pub fn require_offline_access(manager: &AuthManager) -> Result<(), String> {
+    if offline_account(manager)?.is_some() {
+        Ok(())
+    } else {
+        Err("OFFLINE_LOGIN_REQUIRED".into())
+    }
+}
 pub async fn session(manager: &mut AuthManager) -> Result<&Session, String> {
     if manager
         .session
@@ -448,6 +598,7 @@ pub async fn session(manager: &mut AuthManager) -> Result<&Session, String> {
         return Ok(manager.session.as_ref().unwrap());
     }
     let old = saved()?.ok_or("AUTH_LOGIN_REQUIRED")?;
+    manager.diagnostics = Some(AuthDiagnostics::new(&old.client));
     let tokens = response(
         http()?
             .post(TOKEN)
@@ -472,7 +623,13 @@ pub async fn session(manager: &mut AuthManager) -> Result<&Session, String> {
         refresh: refresh.clone(),
         profile: old.profile,
     })?;
-    let session = minecraft(&tokens, &old.client, &AtomicBool::new(false)).await?;
+    let session = minecraft(
+        &tokens,
+        &old.client,
+        &AtomicBool::new(false),
+        manager.diagnostics.as_mut().unwrap(),
+    )
+    .await?;
     save(&Saved {
         client: old.client,
         refresh,
@@ -486,9 +643,13 @@ pub fn sign_out(manager: &mut AuthManager) -> Result<(), String> {
         Ok(()) | Err(keyring::Error::NoEntry) => {}
         Err(_) => return Err("KEYCHAIN_DELETE_FAILED".into()),
     }
+    clear_account(manager);
+    Ok(())
+}
+fn clear_account(manager: &mut AuthManager) {
     manager.session = None;
     manager.pending = None;
-    Ok(())
+    manager.diagnostics = None;
 }
 #[cfg(test)]
 mod tests {
@@ -527,6 +688,200 @@ fn check_cancelled(cancelled: &AtomicBool) -> Result<(), String> {
 #[cfg(test)]
 mod protocol_tests {
     use super::*;
+    fn reply(status: u16, body: &str) -> reqwest::Response {
+        reqwest::Response::from(
+            http::Response::builder()
+                .status(status)
+                .body(reqwest::Body::from(body.to_owned()))
+                .unwrap(),
+        )
+    }
+    fn diagnostic() -> AuthDiagnostics {
+        AuthDiagnostics::new("11111111-2222-4333-8444-555555555555")
+    }
+    #[tokio::test]
+    async fn launcher_denial_can_use_the_standard_exchange_without_changing_identity() {
+        let mut reports = diagnostic();
+        let mut routes = Vec::new();
+        let mut replies = std::collections::VecDeque::from([
+            reply(
+                403,
+                r#"{"error":"FORBIDDEN","access_token":"must-not-be-reported"}"#,
+            ),
+            reply(
+                200,
+                r#"{"access_token":"private-success-token","expires_in":3600}"#,
+            ),
+        ]);
+        let result = exchange_minecraft(
+            |route| {
+                routes.push(route);
+                std::future::ready(Ok(replies.pop_front().unwrap()))
+            },
+            &AtomicBool::new(false),
+            &mut reports,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            routes,
+            [MinecraftLoginRoute::Launcher, MinecraftLoginRoute::Xbox]
+        );
+        assert_eq!(result["access_token"], "private-success-token");
+        let launcher = routes[0].body("same-user", "same-xsts-token");
+        let standard = routes[1].body("same-user", "same-xsts-token");
+        assert_eq!(launcher["xtoken"], standard["identityToken"]);
+        assert_eq!(standard.as_object().unwrap().len(), 1);
+        let report = serde_json::to_string(&reports).unwrap();
+        assert!(report.contains("403"));
+        assert!(report.contains("200"));
+        assert!(!report.contains("must-not-be-reported"));
+        assert!(!report.contains("private-success-token"));
+        assert!(!report.contains("same-xsts-token"));
+    }
+    #[tokio::test]
+    async fn explicit_registration_rejection_is_not_retried_or_inferred_from_generic_403() {
+        for (body, expected) in [
+            (
+                r#"{"errorMessage":"Invalid app registration."}"#,
+                "AUTH_MINECRAFT_APP_APPROVAL_REQUIRED",
+            ),
+            (
+                r#"{"message":"Invalid app registration"}"#,
+                "AUTH_MINECRAFT_APP_APPROVAL_REQUIRED",
+            ),
+            (r#"{"error":"FORBIDDEN"}"#, "AUTH_MINECRAFT_FORBIDDEN"),
+            (
+                "<html>gateway denied request</html>",
+                "AUTH_MINECRAFT_FORBIDDEN",
+            ),
+        ] {
+            assert_eq!(
+                response(reply(403, body), "MINECRAFT").await.unwrap_err(),
+                expected
+            );
+        }
+        let mut count = 0;
+        let mut reports = diagnostic();
+        let error = exchange_minecraft(
+            |_| {
+                count += 1;
+                std::future::ready(Ok(reply(
+                    403,
+                    r#"{"errorMessage":"Invalid app registration"}"#,
+                )))
+            },
+            &AtomicBool::new(false),
+            &mut reports,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, "AUTH_MINECRAFT_APP_APPROVAL_REQUIRED");
+        assert_eq!(count, 1);
+    }
+    #[tokio::test]
+    async fn both_denied_routes_still_fail_and_never_create_a_session() {
+        let mut reports = diagnostic();
+        let error = exchange_minecraft(
+            |_| {
+                std::future::ready(Ok(reply(
+                    403,
+                    r#"{"error":"FORBIDDEN","refresh_token":"secret-value"}"#,
+                )))
+            },
+            &AtomicBool::new(false),
+            &mut reports,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, "AUTH_MINECRAFT_FORBIDDEN");
+        assert_eq!(reports.attempts.len(), 2);
+        assert!(!serde_json::to_string(&reports)
+            .unwrap()
+            .contains("secret-value"));
+    }
+    #[tokio::test]
+    async fn credential_errors_server_errors_and_redirects_are_not_retried() {
+        for status in [301, 400, 401, 429, 500, 502, 503] {
+            let mut count = 0;
+            let mut reports = diagnostic();
+            assert!(exchange_minecraft(
+                |_| {
+                    count += 1;
+                    std::future::ready(Ok(reply(status, "<html>not JSON</html>")))
+                },
+                &AtomicBool::new(false),
+                &mut reports
+            )
+            .await
+            .is_err());
+            assert_eq!(count, 1);
+            assert_eq!(reports.attempts[0].http_status, status);
+        }
+    }
+    #[tokio::test]
+    async fn cancellation_prevents_the_compatibility_request() {
+        let cancelled = AtomicBool::new(false);
+        let mut count = 0;
+        let mut reports = diagnostic();
+        let error = exchange_minecraft(
+            |_| {
+                count += 1;
+                cancelled.store(true, Ordering::Relaxed);
+                std::future::ready(Ok(reply(403, "{}")))
+            },
+            &cancelled,
+            &mut reports,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, "AUTH_CANCELLED");
+        assert_eq!(count, 1);
+        let mut reports = diagnostic();
+        let error = exchange_minecraft(
+            |_| {
+                panic!("A cancelled flow must not send a request");
+                #[allow(unreachable_code)]
+                std::future::ready(Ok(reply(200, "{}")))
+            },
+            &cancelled,
+            &mut reports,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, "AUTH_CANCELLED");
+        assert!(reports.attempts.is_empty());
+    }
+    #[tokio::test]
+    async fn missing_launcher_route_is_compatible_but_invalid_success_responses_are_not() {
+        for status in [404, 405] {
+            let mut reports = diagnostic();
+            let mut replies =
+                std::collections::VecDeque::from([reply(status, ""), reply(200, "{}")]);
+            exchange_minecraft(
+                |_| std::future::ready(Ok(replies.pop_front().unwrap())),
+                &AtomicBool::new(false),
+                &mut reports,
+            )
+            .await
+            .unwrap();
+            assert_eq!(reports.attempts.len(), 2);
+        }
+        let mut reports = diagnostic();
+        let error = exchange_minecraft(
+            |_| std::future::ready(Ok(reply(200, "private-non-json-response"))),
+            &AtomicBool::new(false),
+            &mut reports,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, "AUTH_MINECRAFT_INVALID_RESPONSE");
+        assert_eq!(reports.attempts.len(), 1);
+        assert!(!serde_json::to_string(&reports)
+            .unwrap()
+            .contains("private-non-json-response"));
+        assert!(diagnostics(&AuthManager::default()).is_none());
+    }
     #[tokio::test]
     async fn error_responses_do_not_expose_tokens() {
         let reply = reqwest::Response::from(
@@ -572,6 +927,22 @@ pub async fn verify_entitlement(session: &Session) -> Result<(), String> {
 }
 
 /// Local identity, never stored as a Microsoft session or sent to identity services.
+pub fn launch_offline_identity(
+    manager: &AuthManager,
+    name: Option<&str>,
+) -> Result<Option<Session>, String> {
+    guarded_offline_identity(name, || Ok(offline_account(manager)?.is_some()))
+}
+fn guarded_offline_identity(
+    name: Option<&str>,
+    has_access: impl FnOnce() -> Result<bool, String>,
+) -> Result<Option<Session>, String> {
+    let Some(name) = name else { return Ok(None) };
+    if !has_access()? {
+        return Err("OFFLINE_LOGIN_REQUIRED".into());
+    }
+    offline_session(name).map(Some)
+}
 pub fn offline_session(name: &str) -> Result<Session, String> {
     if name.is_empty()
         || name.len() > 16
@@ -596,6 +967,109 @@ pub fn offline_session(name: &str) -> Result<Session, String> {
 #[cfg(test)]
 mod offline_tests {
     use super::*;
+    #[test]
+    fn offline_launch_requires_private_account_proof_even_with_a_saved_username() {
+        assert_eq!(
+            guarded_offline_identity(Some("Player_1"), || Ok(false))
+                .err()
+                .unwrap(),
+            "OFFLINE_LOGIN_REQUIRED"
+        );
+        assert_eq!(
+            guarded_offline_identity(Some("Player_1"), || Ok(true))
+                .unwrap()
+                .unwrap()
+                .profile
+                .name,
+            "Player_1"
+        );
+        assert!(guarded_offline_identity(Some("invalid local name"), || Ok(true)).is_err());
+        assert_eq!(
+            guarded_offline_identity(Some("Player_1"), || Err("KEYCHAIN_READ_FAILED".into()))
+                .err()
+                .unwrap(),
+            "KEYCHAIN_READ_FAILED"
+        );
+        assert!(guarded_offline_identity(None, || panic!(
+            "Online mode must not inspect offline proof"
+        ))
+        .unwrap()
+        .is_none());
+    }
+    fn verified_saved() -> Saved {
+        Saved {
+            client: "11111111-2222-4333-8444-555555555555".into(),
+            refresh: "synthetic-refresh-for-unit-test".into(),
+            profile: Some(Profile {
+                id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee".into(),
+                name: "VerifiedPlayer".into(),
+            }),
+        }
+    }
+    #[test]
+    fn incomplete_sign_in_does_not_unlock_offline_play() {
+        let manager = AuthManager::default();
+        assert!(verified_offline_account(&manager, None).is_none());
+        let mut cached = verified_saved();
+        cached.profile = None;
+        assert!(verified_offline_account(&manager, Some(&cached)).is_none());
+        manager_session_is_not_offline_proof(offline_session("LocalPlayer").unwrap());
+    }
+    fn manager_session_is_not_offline_proof(session: Session) {
+        let manager = AuthManager {
+            session: Some(session),
+            ..AuthManager::default()
+        };
+        assert!(verified_offline_account(&manager, None).is_none());
+    }
+    #[test]
+    fn verified_account_survives_restart_without_a_network_refresh() {
+        let persisted = serde_json::to_string(&verified_saved()).unwrap();
+        let cached: Saved = serde_json::from_str(&persisted).unwrap();
+        let manager = AuthManager::default();
+        assert_eq!(
+            verified_offline_account(&manager, Some(&cached))
+                .unwrap()
+                .name,
+            "VerifiedPlayer"
+        );
+    }
+    #[test]
+    fn malformed_cached_account_cannot_grant_offline_access() {
+        let manager = AuthManager::default();
+        for field in ["client", "refresh", "id", "name"] {
+            let mut cached = verified_saved();
+            match field {
+                "client" => cached.client.clear(),
+                "refresh" => cached.refresh.clear(),
+                "id" => cached.profile.as_mut().unwrap().id = Uuid::nil().to_string(),
+                "name" => cached.profile.as_mut().unwrap().name.clear(),
+                _ => unreachable!(),
+            }
+            assert!(
+                verified_offline_account(&manager, Some(&cached)).is_none(),
+                "{field}"
+            );
+        }
+    }
+    #[test]
+    fn signing_out_revokes_an_expired_but_previously_verified_session() {
+        let cached = verified_saved();
+        let mut manager = AuthManager {
+            session: Some(Session {
+                profile: cached.profile.unwrap(),
+                token: "synthetic-minecraft-token-for-unit-test".into(),
+                xuid: String::new(),
+                client: cached.client,
+                expires: Instant::now() - Duration::from_secs(60),
+            }),
+            ..AuthManager::default()
+        };
+        assert!(verified_offline_account(&manager, None).is_some());
+        // sign_out deletes the credential first, then calls this same state reset.
+        clear_account(&mut manager);
+        assert!(verified_offline_account(&manager, None).is_none());
+    }
     #[test]
     fn startup_profile_does_not_restore_credentials() {
         assert!(profile(&AuthManager::default()).unwrap().is_none());

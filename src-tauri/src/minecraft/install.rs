@@ -1,3 +1,4 @@
+use super::platform::Platform;
 use super::{
     download::{client, validate_version},
     manifest::{self, Artifact, VersionMetadata},
@@ -73,6 +74,17 @@ pub fn safe_path(value: &str) -> Result<PathBuf, String> {
     if value.is_empty()
         || value.contains('\\')
         || value.contains(':')
+        || value.split('/').any(|part| {
+            let stem = part.split('.').next().unwrap_or("").to_ascii_uppercase();
+            part.is_empty()
+                || part == "."
+                || part == ".."
+                || part.ends_with(['.', ' '])
+                || matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+                || (stem.len() == 4
+                    && (stem.starts_with("COM") || stem.starts_with("LPT"))
+                    && matches!(stem.as_bytes()[3], b'1'..=b'9'))
+        })
         || path
             .components()
             .any(|c| !matches!(c, Component::Normal(_)))
@@ -96,6 +108,8 @@ pub fn public_url(value: &str) -> Result<(), String> {
                     | "launchermeta.mojang.com"
                     | "libraries.minecraft.net"
                     | "maven.fabricmc.net"
+                    | "maven.minecraftforge.net"
+                    | "maven.neoforged.net"
                     | "resources.download.minecraft.net"
             )
         )
@@ -110,7 +124,9 @@ async fn hash_file(path: &Path) -> Result<(u64, String), String> {
         .map_err(|_| "CACHE_READ_FAILED")?;
     let mut hasher = Sha1::new();
     let mut length = 0;
-    let mut buf = [0u8; 65536];
+    // An inline buffer is stored inside this future and every awaiting launch/IPC future.
+    // Keep it on the heap so constructing the command fits Windows' event-thread stack.
+    let mut buf = vec![0u8; 65536];
     loop {
         let n = file.read(&mut buf).await.map_err(|_| "CACHE_READ_FAILED")?;
         if n == 0 {
@@ -209,6 +225,9 @@ pub async fn artifact(
 }
 // Rule order matters: the last matching rule wins; absent feature flags are false.
 pub fn allowed(rules: &[Value]) -> Result<bool, String> {
+    allowed_for(rules, Platform::current()?)
+}
+pub fn allowed_for(rules: &[Value], platform: &Platform) -> Result<bool, String> {
     if rules.is_empty() {
         return Ok(true);
     }
@@ -216,17 +235,23 @@ pub fn allowed(rules: &[Value]) -> Result<bool, String> {
     for rule in rules {
         if let Some(os) = rule.get("os") {
             if let Some(name) = os["name"].as_str() {
-                if name != "osx" {
+                if name != platform.os {
                     continue;
                 }
             }
             if let Some(arch) = os["arch"].as_str() {
-                if !matches!(arch, "arm64" | "aarch64") {
+                if !platform.java_arch_matches(arch) {
                     continue;
                 }
             }
-            if os.get("version").is_some() {
-                return Err("INSTALL_OS_VERSION_RULE_UNSUPPORTED".into());
+            if let Some(version) = os["version"].as_str() {
+                if platform.version.is_empty() {
+                    return Err("INSTALL_OS_VERSION_RULE_UNSUPPORTED".into());
+                }
+                let expression = regex::Regex::new(version).map_err(|_| "INSTALL_INVALID_RULE")?;
+                if !expression.is_match(&platform.version) {
+                    continue;
+                }
             }
         }
         if let Some(features) = rule["features"].as_object() {
@@ -243,32 +268,63 @@ pub fn allowed(rules: &[Value]) -> Result<bool, String> {
     Ok(allow)
 }
 pub fn selected_libraries(info: &VersionMetadata) -> Result<Vec<&Artifact>, String> {
-    let mut selected = Vec::new();
-    let mut arm_natives = false;
+    Ok(library_plan(info, Platform::current()?)?.classpath)
+}
+pub struct LibraryPlan<'a> {
+    pub classpath: Vec<&'a Artifact>,
+    pub natives: Vec<&'a Artifact>,
+}
+pub fn library_plan<'a>(
+    info: &'a VersionMetadata,
+    platform: &Platform,
+) -> Result<LibraryPlan<'a>, String> {
+    let mut selected = LibraryPlan {
+        classpath: Vec::new(),
+        natives: Vec::new(),
+    };
     for lib in &info.libraries {
-        if !allowed(&lib.rules)? {
+        if !allowed_for(&lib.rules, platform)? {
             continue;
         }
-        if lib.name.contains(":natives-") {
-            if !lib.name.ends_with(":natives-macos-arm64") {
+        let native = lib
+            .name
+            .split(':')
+            .nth(3)
+            .is_some_and(|s| s.starts_with("natives-"));
+        if native {
+            if lib.name.split(':').nth(3) != Some(platform.native_classifier()) {
                 continue;
             }
-            arm_natives = true;
         }
         if let Some(artifact) = &lib.downloads.artifact {
             safe_path(&artifact.path)?;
-            selected.push(artifact);
+            selected.classpath.push(artifact);
+            if native {
+                selected.natives.push(artifact);
+            }
+        }
+        if let Some(classifier) = lib.natives.get(platform.os) {
+            let classifier = classifier.replace("${arch}", "64");
+            // Old macOS native archives contain Intel binaries, not Apple Silicon.
+            if platform.os == "osx" && !classifier.contains("arm64") {
+                return Err("INSTALL_ARM64_VERSION_REQUIRED".into());
+            }
+            let artifact = lib
+                .downloads
+                .classifiers
+                .get(&classifier)
+                .ok_or("INSTALL_NATIVE_NOT_FOUND")?;
+            safe_path(&artifact.path)?;
+            selected.natives.push(artifact);
         }
     }
-    if !arm_natives {
-        return Err("INSTALL_ARM64_VERSION_REQUIRED".into());
+    if selected.natives.is_empty() {
+        return Err("INSTALL_NATIVE_NOT_FOUND".into());
     }
     Ok(selected)
 }
 pub async fn install(version: &str, root: &Path, job: &Job) -> Result<Installed, String> {
-    if !cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-        return Err("INSTALL_APPLE_SILICON_ONLY".into());
-    }
+    let platform = Platform::current()?;
     validate_version(version)?;
     job.check()?;
     job.report("metadata", 0, 0);
@@ -277,7 +333,7 @@ pub async fn install(version: &str, root: &Path, job: &Job) -> Result<Installed,
     if !matches!(info.java_version.major, 17 | 21 | 25) {
         return Err("JAVA_UNSUPPORTED_VERSION".into());
     }
-    let selected = selected_libraries(&info)?;
+    let selected = library_plan(&info, platform)?;
     let dir = root.join("versions").join(version);
     let jar = dir.join(format!("{version}.jar"));
     let client_artifact = info
@@ -299,8 +355,8 @@ pub async fn install(version: &str, root: &Path, job: &Job) -> Result<Installed,
         .await
         .map_err(|_| "CACHE_WRITE_FAILED")?;
     let mut classpath = Vec::new();
-    let count = selected.len();
-    for (index, lib) in selected.iter().enumerate() {
+    let count = selected.classpath.len();
+    for (index, lib) in selected.classpath.iter().enumerate() {
         job.check()?;
         job.report("libraries", index, count);
         let path = root.join("libraries").join(safe_path(&lib.path)?);
@@ -308,6 +364,40 @@ pub async fn install(version: &str, root: &Path, job: &Job) -> Result<Installed,
         classpath.push(path);
     }
     classpath.push(jar);
+    let natives = dir.join(format!("natives-{}", platform.key()));
+    let staging = dir.join(format!("natives-staging-{}", uuid::Uuid::new_v4()));
+    tokio::fs::create_dir_all(&staging)
+        .await
+        .map_err(|_| "CACHE_CREATE_FAILED")?;
+    let extraction = async {
+        for (index, lib) in selected.natives.iter().enumerate() {
+            job.report("natives", index, selected.natives.len());
+            let path = root.join("libraries").join(safe_path(&lib.path)?);
+            artifact(&http, &lib.url, lib.size, &lib.sha1, &path, job).await?;
+            let output = staging.clone();
+            let extract_job = job.clone();
+            tokio::task::spawn_blocking(move || {
+                super::archive::extract_zip(&path, &output, true, &extract_job)
+            })
+            .await
+            .map_err(|_| "INSTALL_NATIVE_EXTRACT_FAILED")??;
+        }
+        job.check()?;
+        if natives.exists() {
+            tokio::fs::remove_dir_all(&natives)
+                .await
+                .map_err(|_| "CACHE_WRITE_FAILED")?;
+        }
+        tokio::fs::rename(&staging, &natives)
+            .await
+            .map_err(|_| "CACHE_WRITE_FAILED")?;
+        Ok::<(), String>(())
+    }
+    .await;
+    if let Err(error) = extraction {
+        let _ = tokio::fs::remove_dir_all(&staging).await;
+        return Err(error);
+    }
     let logging_argument = if let Some(logging) = &info.logging {
         let file = &logging.client.file;
         let path = root.join("log_configs").join(safe_path(&file.id)?);
@@ -391,10 +481,6 @@ pub async fn install(version: &str, root: &Path, job: &Job) -> Result<Installed,
     .buffer_unordered(12)
     .try_collect::<Vec<_>>()
     .await?;
-    let natives = dir.join("natives-arm64");
-    tokio::fs::create_dir_all(&natives)
-        .await
-        .map_err(|_| "CACHE_CREATE_FAILED")?;
     job.report("installed", 1, 1);
     Ok(Installed {
         info,
@@ -408,6 +494,36 @@ pub async fn install(version: &str, root: &Path, job: &Job) -> Result<Installed,
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn cached_artifact_is_verified_across_multiple_buffer_reads() {
+        let root = std::env::temp_dir().join(format!("midnight-hash-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir(&root).await.unwrap();
+        let path = root.join("cached.jar");
+        let bytes: Vec<u8> = (0..200_003).map(|index| (index % 251) as u8).collect();
+        tokio::fs::write(&path, &bytes).await.unwrap();
+        let expected = format!("{:x}", Sha1::digest(&bytes));
+        assert_eq!(
+            hash_file(&path).await.unwrap(),
+            (bytes.len() as u64, expected.clone())
+        );
+        let job = Job {
+            cancel: Arc::new(AtomicBool::new(false)),
+            app: None,
+        };
+        // A valid cache must succeed without connecting to this nonexistent URL.
+        artifact(
+            &client().unwrap(),
+            "https://piston-data.mojang.com/never-request-this-cached-artifact",
+            bytes.len() as u64,
+            &expected,
+            &path,
+            &job,
+        )
+        .await
+        .unwrap();
+        tokio::fs::remove_dir_all(&root).await.unwrap();
+    }
+
     #[test]
     fn paths_and_hosts_are_restricted() {
         for p in ["../outside", "/tmp/file", "a/../../x", "a\\b", "C:/x", ""] {
@@ -419,26 +535,79 @@ mod tests {
     }
     #[test]
     fn rule_order_and_features() {
-        assert!(allowed(&[]).unwrap());
-        assert!(!allowed(&[
-            serde_json::json!({"action":"allow","features":{"is_demo_user":true}})
-        ])
+        let platform = Platform::mac_arm64();
+        assert!(allowed_for(&[], &platform).unwrap());
+        assert!(!allowed_for(
+            &[serde_json::json!({"action":"allow","features":{"is_demo_user":true}})],
+            &platform
+        )
         .unwrap());
-        assert!(!allowed(&[
-            serde_json::json!({"action":"allow"}),
-            serde_json::json!({"action":"disallow","os":{"name":"osx"}})
-        ])
+        assert!(!allowed_for(
+            &[
+                serde_json::json!({"action":"allow"}),
+                serde_json::json!({"action":"disallow","os":{"name":"osx"}})
+            ],
+            &platform
+        )
         .unwrap());
-        assert!(!allowed(&[serde_json::json!({"action":"allow","os":{"arch":"x86"}})]).unwrap());
+        assert!(!allowed_for(
+            &[serde_json::json!({"action":"allow","os":{"arch":"x86"}})],
+            &platform
+        )
+        .unwrap());
     }
     #[test]
     fn official_metadata_selects_only_arm64_natives() {
         let info: VersionMetadata =
             serde_json::from_str(include_str!("../../tests/fixtures/1.21.1.json")).unwrap();
-        let libs = selected_libraries(&info).unwrap();
+        let libs = library_plan(&info, &Platform::mac_arm64())
+            .unwrap()
+            .classpath;
         assert!(libs.iter().any(|l| l.path.contains("natives-macos-arm64")));
         assert!(!libs.iter().any(|l| l.path.contains("natives-windows")
             || l.path.contains("natives-linux")
             || l.path.ends_with("natives-macos.jar")));
+    }
+    #[test]
+    fn windows_metadata_excludes_x86_arm_and_mac_natives() {
+        let info: VersionMetadata =
+            serde_json::from_str(include_str!("../../tests/fixtures/1.21.1.json")).unwrap();
+        let plan = library_plan(&info, &Platform::windows_x64("10.0.26200".into())).unwrap();
+        assert_eq!(plan.natives.len(), 8);
+        assert!(plan
+            .natives
+            .iter()
+            .all(|a| a.path.ends_with("-natives-windows.jar")));
+        assert!(!plan
+            .classpath
+            .iter()
+            .any(|a| a.path.contains("natives-macos")
+                || a.path.contains("natives-linux")
+                || a.path.contains("natives-windows-arm64")
+                || a.path.contains("natives-windows-x86")));
+    }
+    #[test]
+    fn windows_version_rules_and_legacy_classifiers() {
+        let windows = Platform::windows_x64("10.0.26200.0".into());
+        assert!(allowed_for(
+            &[serde_json::json!({"action":"allow","os":{"name":"windows","version":"^10\\."}})],
+            &windows
+        )
+        .unwrap());
+        assert!(!allowed_for(
+            &[serde_json::json!({"action":"allow","os":{"name":"windows","version":"^6\\."}})],
+            &windows
+        )
+        .unwrap());
+        let mut info: VersionMetadata =
+            serde_json::from_str(include_str!("../../tests/fixtures/1.21.1.json")).unwrap();
+        info.libraries = vec![serde_json::from_value(serde_json::json!({
+            "name": "test:library:1", "natives": {"windows":"natives-windows-${arch}"},
+            "downloads": {"artifact": {"url":"https://libraries.minecraft.net/test/library.jar","sha1":"a".repeat(40),"size":1,"path":"test/library.jar"},
+            "classifiers": {"natives-windows-64": {"url":"https://libraries.minecraft.net/test/native.jar","sha1":"b".repeat(40),"size":1,"path":"test/native.jar"}}}
+        })).unwrap()];
+        let plan = library_plan(&info, &windows).unwrap();
+        assert_eq!(plan.classpath.len(), 1);
+        assert_eq!(plan.natives[0].path, "test/native.jar");
     }
 }

@@ -1,4 +1,5 @@
 use super::install::{allowed, safe_path, Installed};
+use super::platform::{command, Platform};
 use crate::auth::Session;
 use serde::Serialize;
 use std::{
@@ -8,7 +9,7 @@ use std::{
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    process::{Child, Command},
+    process::Child,
 };
 #[derive(Default)]
 pub struct GameState(pub tokio::sync::Mutex<Option<Child>>);
@@ -134,11 +135,14 @@ pub fn args(
                 .to_string_lossy()
                 .to_string(),
         ),
-        ("classpath_separator", ":".into()),
+        (
+            "classpath_separator",
+            Platform::current()?.classpath_separator().into(),
+        ),
     ]);
     let mut args = vec!["-Xms512M".into(), format!("-Xmx{memory}M")];
     args.extend(expand(&installed.info.arguments.jvm, &vars)?);
-    if !args.iter().any(|a| a == "-XstartOnFirstThread") {
+    if Platform::current()?.os == "osx" && !args.iter().any(|a| a == "-XstartOnFirstThread") {
         args.push("-XstartOnFirstThread".into());
     }
     if let Some(argument) = &installed.logging_argument {
@@ -148,7 +152,11 @@ pub fn args(
     args.extend(expand(&installed.info.arguments.game, &vars)?);
     Ok(args)
 }
-async fn log_stream<R: tokio::io::AsyncRead + Unpin>(stream: R, path: PathBuf, secret: String) {
+pub(super) async fn log_stream<R: tokio::io::AsyncRead + Unpin>(
+    stream: R,
+    path: PathBuf,
+    secret: String,
+) {
     let Ok(mut file) = tokio::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -172,6 +180,8 @@ async fn log_stream<R: tokio::io::AsyncRead + Unpin>(stream: R, path: PathBuf, s
         let _ = file.write_all(text.as_bytes()).await;
         line.clear();
     }
+    // Finish queued filesystem writes before the stream task (or runtime) exits.
+    let _ = file.flush().await;
 }
 pub async fn start(
     installed: &Installed,
@@ -198,7 +208,7 @@ pub async fn start(
     job.check()?;
     let arguments = args(installed, &game, session, memory)?;
     // No shell and no token/argument logging. JVM credentials remain in Rust.
-    let mut child = Command::new(java)
+    let mut child = command(java)
         .args(arguments)
         .current_dir(&game)
         .stdout(Stdio::piped())
@@ -232,5 +242,42 @@ mod tests {
             vec!["--gameDir", "/path with spaces/game"]
         );
         assert!(expand(&[serde_json::json!("${missing}")], &vars).is_err());
+    }
+    #[cfg(windows)]
+    #[test]
+    fn windows_launch_uses_x64_rules_and_semicolon_classpath() {
+        let info = serde_json::from_str(include_str!("../../tests/fixtures/1.21.1.json")).unwrap();
+        let installed = Installed {
+            info,
+            root: PathBuf::from(r"C:\Game files"),
+            classpath: vec![
+                PathBuf::from(r"C:\Game files\a.jar"),
+                PathBuf::from(r"C:\Game files\b.jar"),
+            ],
+            assets: PathBuf::from(r"C:\Game files\assets"),
+            natives: PathBuf::from(r"C:\Game files\natives-windows-x64"),
+            logging_argument: None,
+        };
+        let session = crate::auth::offline_session("MidnightCheck").unwrap();
+        let arguments = args(
+            &installed,
+            Path::new(r"C:\Worlds with spaces"),
+            &session,
+            4096,
+        )
+        .unwrap();
+        assert!(!arguments
+            .iter()
+            .any(|s| s == "-XstartOnFirstThread" || s == "-Xss1M"));
+        let cp = arguments.iter().position(|s| s == "-cp").unwrap();
+        assert_eq!(
+            arguments[cp + 1],
+            r"C:\Game files\a.jar;C:\Game files\b.jar"
+        );
+        assert!(arguments
+            .iter()
+            .any(|s| s.contains("MojangTricksIntelDrivers")));
+        let game = arguments.iter().position(|s| s == "--gameDir").unwrap();
+        assert_eq!(arguments[game + 1], r"C:\Worlds with spaces");
     }
 }

@@ -1,0 +1,36 @@
+{
+  "id": "Xw8Geo0z",
+  "project_id": "IXZPFrP2",
+  "name": "wonderland.jar 3.0.3",
+  "version_number": "3.0.3",
+  "version_type": "release",
+  "date_published": "2026-08-28T20:56:07.192146Z",
+  "game_versions": [
+    "1.20.1"
+  ],
+  "loaders": [
+    "forge"
+  ],
+  "files": [
+    {
+      "id": "VapGNE5s",
+      "hashes": {
+        "sha1": "530b5b581e66b724088e9f5b0e6c190852ee6047",
+        "sha512": "269c591e42804c2bd3d8d2229315c1b0d55fc20ffd2e0bf387cf29e5598b6ab4aff80c00194407538fedfce0f955d8ad8aab9e5a3082bea2ac9bb78c48c2e3e2"
+      },
+      "url": "https://cdn.modrinth.com/data/IXZPFrP2/versions/Xw8Geo0z/the_wonderland-3.0.3-1.20.1-forge.jar",
+      "filename": "the_wonderland-3.0.3-1.20.1-forge.jar",
+      "primary": true,
+      "size": 175374232,
+      "file_type": null
+    }
+  ],
+  "dependencies": [
+    {
+      "version_id": null,
+      "project_id": "8BmcQJ2H",
+      "file_name": null,
+      "dependency_type": "required"
+    }
+  ]
+}

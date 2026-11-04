@@ -1,0 +1,11 @@
+{
+  "search": {
+    "data": [{"id":123456,"slug":"fixture-mod","name":"Fixture mod","summary":"Synthetic fixture following the official CurseForge schema","authors":[{"name":"Fixture author"}],"downloadCount":42,"allowModDistribution":false}],
+    "pagination":{"index":0,"pageSize":20,"resultCount":1,"totalCount":1}
+  },
+  "file": {
+    "id":222222,"modId":123456,"fileName":"fixture.jar","displayName":"Fixture 1.0","fileDate":"2026-10-01T00:00:00Z","fileLength":100,"releaseType":1,"isAvailable":true,"downloadUrl":null,
+    "gameVersions":["1.21.1","Fabric"],"hashes":[{"algo":1,"value":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}],
+    "dependencies":[{"modId":654321,"relationType":3},{"modId":999999,"relationType":5},{"modId":555555,"relationType":2}]
+  }
+}

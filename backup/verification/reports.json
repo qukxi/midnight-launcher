@@ -1,0 +1,210 @@
+[
+  {
+    "source": "artifacts/catalog large mod verification/catalog-check.json",
+    "report": {
+      "files": [
+        {
+          "enabled": true,
+          "fileName": "geckolib-forge-1.20.1-4.8.4.jar",
+          "size": 1038209
+        },
+        {
+          "enabled": true,
+          "fileName": "the_wonderland-3.0.3-1.20.1-forge.jar",
+          "size": 175374232
+        }
+      ],
+      "first": {
+        "disabled": 0,
+        "installed": 2,
+        "reused": 0
+      },
+      "game": "1.20.1",
+      "gameplayTested": false,
+      "loader": "forge",
+      "project": {
+        "author": "alexander.25.k",
+        "canDownload": true,
+        "description": "They trapped us in this hell, and called it their wonderland.",
+        "downloads": 1290015,
+        "iconUrl": "https://cdn.modrinth.com/data/IXZPFrP2/1aeb72d5a867b58306045f0f0eba09f5f2922761_96.webp",
+        "id": "IXZPFrP2",
+        "slug": "wonderland-jar",
+        "title": "wonderland.jar"
+      },
+      "release": {
+        "canDownload": true,
+        "channel": "release",
+        "id": "Xw8Geo0z",
+        "name": "wonderland.jar 3.0.3",
+        "number": "3.0.3",
+        "published": "2026-08-28T20:56:07.192146Z",
+        "size": 175374232
+      },
+      "second": {
+        "disabled": 0,
+        "installed": 0,
+        "reused": 2
+      }
+    }
+  },
+  {
+    "source": "artifacts/catalog verification/catalog-check.json",
+    "report": {
+      "first": {
+        "disabled": 0,
+        "installed": 2,
+        "reused": 0
+      },
+      "gameplayTested": false,
+      "project": {
+        "author": "LambdAurora",
+        "canDownload": true,
+        "description": "Adds dynamic lights to Minecraft as the most feature-complete and optimized dynamic lighting mod.",
+        "downloads": 65272493,
+        "id": "yBW8D80W",
+        "slug": "lambdynamiclights",
+        "title": "LambDynamicLights - Dynamic Lights"
+      },
+      "release": {
+        "canDownload": true,
+        "channel": "release",
+        "id": "ksaGCvSu",
+        "name": "LambDynamicLights 4.8.11 (1.21.1)",
+        "number": "4.8.11+1.21.1",
+        "published": "2026-08-31T19:27:29.04271Z",
+        "size": 2023375
+      },
+      "second": {
+        "disabled": 0,
+        "installed": 0,
+        "reused": 2
+      }
+    }
+  },
+  {
+    "source": "artifacts/modpack verification/modpack-check.json",
+    "report": {
+      "directory": "C:\\Users\\qukxi\\Downloads\\midnight-launcher\\artifacts\\modpack verification\\instances\\modrinth-464873d3-0c54-4b44-a54a-29feb2c4dd89",
+      "gameplayTested": false,
+      "installed": {
+        "files": 32,
+        "instance": {
+          "engine": "java",
+          "id": "modrinth-464873d3-0c54-4b44-a54a-29feb2c4dd89",
+          "loader": {
+            "kind": "fabric",
+            "version": "0.18.4"
+          },
+          "modpack": {
+            "projectId": "BYfVnHa7",
+            "versionId": "UP68ggjK",
+            "versionName": "1.21.11-3.1.2"
+          },
+          "name": "Simply Optimized",
+          "version": "1.21.11"
+        }
+      },
+      "release": {
+        "channel": "release",
+        "gameVersions": [
+          "1.21.11"
+        ],
+        "id": "UP68ggjK",
+        "name": "1.21.11-3.1.2",
+        "number": "1.21.11-3.1.2",
+        "published": "2026-02-03T18:19:57.446994Z"
+      }
+    }
+  },
+  {
+    "source": "artifacts/windows verification/forge-check.json",
+    "report": {
+      "aliveAfterSeconds": 45,
+      "authenticated": false,
+      "classpathEntries": 80,
+      "game": "1.20.1",
+      "gameplayTested": false,
+      "launched": true,
+      "loader": "forge",
+      "loaderVersion": "47.4.28",
+      "mainClass": "cpw.mods.bootstraplauncher.BootstrapLauncher",
+      "pid": 1408,
+      "rendererReady": true
+    }
+  },
+  {
+    "source": "artifacts/windows verification/neoforge-check.json",
+    "report": {
+      "aliveAfterSeconds": 45,
+      "authenticated": false,
+      "classpathEntries": 91,
+      "game": "1.21.1",
+      "gameplayTested": false,
+      "launched": true,
+      "loader": "neoforge",
+      "loaderVersion": "21.1.265",
+      "mainClass": "cpw.mods.bootstraplauncher.BootstrapLauncher",
+      "pid": 23376,
+      "rendererReady": true
+    }
+  },
+  {
+    "source": "artifacts/windows verification/windows-first-launch.json",
+    "report": {
+      "authenticated": false,
+      "classpathEntries": 55,
+      "earlyExit": 0,
+      "java": "C:\\Users\\qukxi\\Downloads\\midnight-launcher\\artifacts\\windows verification\\java\\temurin-21-windows-x64\\jdk-21.0.13+9-jre\\bin/java.exe",
+      "nativeFiles": [
+        "freetype.dll",
+        "glfw.dll",
+        "jemalloc.dll",
+        "lwjgl.dll",
+        "lwjgl_opengl.dll",
+        "lwjgl_stb.dll",
+        "lwjgl_tinyfd.dll",
+        "OpenAL.dll"
+      ],
+      "natives": "C:\\Users\\qukxi\\Downloads\\midnight-launcher\\artifacts\\windows verification\\minecraft\\versions\\1.21.1\\natives-windows-x64",
+      "version": "1.21.1"
+    }
+  },
+  {
+    "source": "artifacts/windows verification/windows-verification.json",
+    "report": {
+      "authenticated": false,
+      "classpathEntries": 55,
+      "earlyExit": 0,
+      "java": "C:\\Users\\qukxi\\Downloads\\midnight-launcher\\artifacts\\windows verification\\java\\temurin-21-windows-x64\\jdk-21.0.13+9-jre\\bin/java.exe",
+      "nativeFiles": [
+        "freetype.dll",
+        "glfw.dll",
+        "jemalloc.dll",
+        "lwjgl.dll",
+        "lwjgl_opengl.dll",
+        "lwjgl_stb.dll",
+        "lwjgl_tinyfd.dll",
+        "OpenAL.dll"
+      ],
+      "natives": "C:\\Users\\qukxi\\Downloads\\midnight-launcher\\artifacts\\windows verification\\minecraft\\versions\\1.21.1\\natives-windows-x64",
+      "version": "1.21.1"
+    }
+  },
+  {
+    "source": "artifacts/installer verification/6471f174/result.json",
+    "report": {
+      "install": "passed",
+      "checkedAt": "2026-11-01T12:00:03.6938441Z",
+      "reinstall": "passed",
+      "authenticatedGameplay": "not tested",
+      "uninstall": "passed",
+      "installPath": "C:\\Users\\qukxi\\Downloads\\midnight-launcher\\artifacts\\installer verification\\6471f174\\app with spaces",
+      "unrelatedFilePreserved": true,
+      "bundleId": "dev.midnight.installer-check-6471f174",
+      "isolatedInstaller": "C:\\Users\\qukxi\\Downloads\\midnight-launcher\\src-tauri\\target\\x86_64-pc-windows-msvc\\release\\bundle\\nsis\\Midnight Installer Check 6471f174_0.2.0_x64-setup.exe",
+      "sourceSha256": "272BB3F5EB4B11A3ABAD96FC74684E40E292E27C05785796FC1FC5B5633D62C1",
+      "productName": "Midnight Installer Check 6471f174"
+    }
+  }
+]

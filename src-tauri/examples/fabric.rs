@@ -30,6 +30,7 @@ async fn main() -> Result<(), String> {
             kind: "fabric".into(),
             version: "0.16.14".into(),
         }),
+        std::path::Path::new(""),
         &job,
     )
     .await?;

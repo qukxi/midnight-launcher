@@ -42,7 +42,16 @@ fn valid(value: &str) -> bool {
 }
 pub fn validate(loader: &Option<Loader>) -> Result<(), String> {
     if let Some(l) = loader {
-        if l.kind != "fabric" || !valid(&l.version) {
+        if !matches!(l.kind.as_str(), "fabric" | "forge" | "neoforge")
+            || !valid(&l.version)
+            || (l.kind == "forge"
+                && !l
+                    .version
+                    .split('.')
+                    .next()
+                    .and_then(|v| v.parse::<u32>().ok())
+                    .is_some_and(|v| v >= 38))
+        {
             return Err("LOADER_UNSUPPORTED".into());
         }
     }
@@ -84,6 +93,13 @@ pub async fn versions(game: &str) -> Result<Vec<String>, String> {
         .map(|e| e.loader.version)
         .collect())
 }
+pub async fn versions_for(game: &str, kind: &str) -> Result<Vec<String>, String> {
+    match kind {
+        "fabric" => versions(game).await,
+        "forge" | "neoforge" => super::forge::versions(kind, game).await,
+        _ => Err("LOADER_UNSUPPORTED".into()),
+    }
+}
 fn library_path(name: &str) -> Result<String, String> {
     let parts: Vec<_> = name.split(':').collect();
     if parts.len() != 3 || !parts.iter().all(|p| valid(p)) {
@@ -101,12 +117,16 @@ fn library_path(name: &str) -> Result<String, String> {
 pub async fn apply(
     installed: &mut Installed,
     loader: &Option<Loader>,
+    java: &std::path::Path,
     job: &Job,
 ) -> Result<(), String> {
     validate(loader)?;
     let Some(l) = loader else {
         return Ok(());
     };
+    if l.kind != "fabric" {
+        return super::forge::apply(installed, l, java, job).await;
+    }
     let http = download::client()?;
     let raw = get(
         &http,
@@ -178,7 +198,7 @@ mod tests {
     #[test]
     fn rejects_unsupported_loaders_and_paths() {
         assert!(validate(&Some(Loader {
-            kind: "forge".into(),
+            kind: "quilt".into(),
             version: "1".into()
         }))
         .is_err());

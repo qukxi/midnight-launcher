@@ -47,10 +47,14 @@ pub struct Library {
     #[serde(default)]
     pub rules: Vec<serde_json::Value>,
     pub downloads: LibraryDownloads,
+    #[serde(default)]
+    pub natives: std::collections::HashMap<String, String>,
 }
 #[derive(Deserialize)]
 pub struct LibraryDownloads {
     pub artifact: Option<Artifact>,
+    #[serde(default)]
+    pub classifiers: std::collections::HashMap<String, Artifact>,
 }
 #[derive(Deserialize)]
 pub struct AssetIndex {

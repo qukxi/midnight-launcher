@@ -1,6 +1,6 @@
 import { themes } from '../src/themes';
 import { describe, it, expect } from 'vitest';
-import { defaultClientId, initialState, restoreState, validateInstance } from '../src/model';
+import { connectHorizon, defaultClientId, horizonVersion, initialState, restoreState, validateInstance } from '../src/model';
 describe('persisted launcher state', () => {
   it('recovers from malformed or incompatible storage', () => {
     for (const raw of ['oops', '{}', 'null', JSON.stringify({ ...initialState, instances: [] }), JSON.stringify({ ...initialState, selected: 'missing' }), JSON.stringify({ ...initialState, settings: { ...initialState.settings, memory: -1 } })]) expect(restoreState(raw)).toEqual(initialState);
@@ -50,6 +50,54 @@ describe('offline profiles', () => {
 
 
 describe('instance loaders', () => {
+  it('restores Forge and NeoForge pins without resetting the collection or preferences', () => {
+    for (const kind of ['forge', 'neoforge'] as const) {
+      const state = { ...structuredClone(initialState), instances: [{ ...initialState.instances[0], loader: { kind, version: kind === 'forge' ? '47.4.28' : '21.1.265' } }] };
+      expect(restoreState(JSON.stringify(state))).toEqual(state);
+      expect(restoreState(JSON.stringify({ ...state, instances: [{ ...state.instances[0], loader: { kind, version: '../escape' } }] }))).toEqual(initialState);
+    }
+  });
+  it('connects Rust as a separate selected instance without changing Java instances or preferences', () => {
+    const before = structuredClone(initialState);
+    const state = connectHorizon(before, 'rust-one');
+    expect(state.instances[0]).toEqual(initialState.instances[0]);
+    expect(state.selected).toBe('rust-one');
+    expect(state.instances[1]).toMatchObject({ id: 'rust-one', engine: 'horizon', version: horizonVersion });
+    expect(state.instances[1].loader).toBeUndefined();
+    expect(restoreState(JSON.stringify(state))).toEqual(state);
+    expect(before).toEqual(initialState);
+    expect(state.settings).toEqual(before.settings);
+  });
+  it('reuses an existing Rust instance and its custom settings, including at the instance limit', () => {
+    const state = connectHorizon(initialState, 'rust-one');
+    state.instances[1] = { ...state.instances[1], name: 'Custom Rust', javaPath: 'C:/custom/java.exe' };
+    while (state.instances.length < 100) state.instances.push({ id: `world-${state.instances.length}`, name: 'World', version: '1.21.1' });
+    const next = connectHorizon({ ...state, selected: 'vanilla' }, 'unused');
+    expect(next.selected).toBe('rust-one'); expect(next.instances).toHaveLength(100);
+    expect(next.instances[1]).toEqual(state.instances[1]);
+    const withoutRust = { ...state, selected: 'vanilla', instances: state.instances.map(i => ({ ...i, engine: 'java' as const })) };
+    expect(() => connectHorizon(withoutRust, 'overflow')).toThrow('100');
+  });
+  it('keeps downloaded modpack provenance without breaking old instances or corrupted optional metadata', () => {
+    const modpack = { projectId: 'pack123', versionId: 'release1', versionName: '1.0.0' };
+    const instance = { ...initialState.instances[0], loader: { kind: 'fabric', version: '0.16.14' }, modpack };
+    const state = { ...initialState, instances: [instance] };
+    expect(restoreState(JSON.stringify(state)).instances[0]).toEqual(instance);
+    for (const invalid of [null, { ...modpack, projectId: '../outside' }, { ...modpack, versionName: 123 }]) {
+      const restored = restoreState(JSON.stringify({ ...state, instances: [{ ...instance, modpack: invalid }] }));
+      expect(restored.instances[0].modpack).toBeUndefined();
+      expect(restored.instances[0].loader).toEqual(instance.loader);
+    }
+  });
+  it('keeps native Horizon instances separate from Java loader profiles', () => {
+    const native = { ...initialState.instances[0], engine: 'horizon', version: horizonVersion };
+    const state = { ...initialState, instances: [native] };
+    expect(restoreState(JSON.stringify(state)).instances[0]).toEqual(native);
+    for (const patch of [{ engine: 'unknown' }, { version: '1.21.1' }, { loader: { kind: 'fabric', version: '0.16.14' } }]) {
+      expect(restoreState(JSON.stringify({ ...state, instances: [{ ...native, ...patch }] }))).toEqual(initialState);
+    }
+    expect(restoreState(JSON.stringify(initialState)).instances[0].engine).toBeUndefined();
+  });
   it('keeps Vanilla saves and retains a pinned Fabric loader', () => {
     const old = restoreState(JSON.stringify(initialState));
     expect(old.instances[0].loader).toBeUndefined();

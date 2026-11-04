@@ -1,0 +1,5 @@
+{
+  "id":"root0001","project_id":"proj0001","name":"Fixture 1.0","version_number":"1.0","version_type":"release","game_versions":["1.21.1"],"loaders":["fabric"],
+  "files":[{"filename":"fixture.jar","primary":true,"size":100,"url":"https://cdn.modrinth.com/data/proj0001/versions/root0001/fixture.jar","hashes":{"sha1":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}],
+  "dependencies":[{"project_id":"deppr001","version_id":"dep00001","dependency_type":"required"},{"project_id":"optpr001","version_id":null,"dependency_type":"optional"}]
+}

@@ -1,0 +1,3 @@
+47bcdf5ccabce61d2480e3eca8a0794a3381fcc5540ca575b7c543b1dc415292  backup/verification/screenshots.zip
+e25e63c03c99f2cf8bd8b66e0ff3a5aefa33a6e8aa318ba167868c291af15178  backup/windows/Midnight-Launcher-0.2.0-windows-x64.zip
+bffd99ad15c937dec09a5e593a3e466c077f311386c5a81d9c17e8725439651e  backup/windows/Midnight-Launcher-0.2.0-x64-setup.exe

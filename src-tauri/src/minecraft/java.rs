@@ -1,4 +1,8 @@
-use super::{download::client, install::Job};
+use super::{
+    download::client,
+    install::Job,
+    platform::{command, Platform},
+};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
@@ -6,7 +10,6 @@ use std::{
     time::Duration,
 };
 use tokio::io::AsyncWriteExt;
-use tokio::process::Command;
 #[derive(Deserialize)]
 struct Release {
     binary: Binary,
@@ -28,7 +31,7 @@ pub async fn verify(path: &Path, major: u32) -> Result<(), String> {
     }
     let result = tokio::time::timeout(
         Duration::from_secs(15),
-        Command::new(path)
+        command(path)
             .args(["-XshowSettings:properties", "-version"])
             .kill_on_drop(true)
             .output(),
@@ -50,11 +53,12 @@ pub async fn verify(path: &Path, major: u32) -> Result<(), String> {
     {
         return Err(format!("JAVA_MAJOR_REQUIRED_{major}"));
     }
-    if !output
-        .lines()
-        .any(|line| matches!(line.trim(), "os.arch = aarch64" | "os.arch = arm64"))
-    {
-        return Err("JAVA_ARM64_REQUIRED".into());
+    if !output.lines().any(|line| {
+        line.trim()
+            .strip_prefix("os.arch = ")
+            .is_some_and(|arch| Platform::current().is_ok_and(|p| p.java_arch_matches(arch)))
+    }) {
+        return Err("JAVA_ARCHITECTURE_REQUIRED".into());
     }
     Ok(())
 }
@@ -66,7 +70,11 @@ fn java_in(path: &Path, depth: u8) -> Option<PathBuf> {
     if java.is_file() {
         return Some(java);
     }
-    let java = path.join("bin/java");
+    let java = path.join(if cfg!(windows) {
+        "bin/java.exe"
+    } else {
+        "bin/java"
+    });
     if java.is_file() {
         return Some(java);
     }
@@ -113,7 +121,11 @@ fn safe_link(path: &Path, link: &Path, hard: bool) -> bool {
     }
     true
 }
-fn unpack(archive: &Path, destination: &Path) -> Result<(), String> {
+fn unpack(archive: &Path, destination: &Path, is_zip: bool, job: &Job) -> Result<(), String> {
+    if is_zip {
+        super::archive::extract_zip(archive, destination, false, job)?;
+        return Ok(());
+    }
     let file = std::fs::File::open(archive).map_err(|_| "JAVA_ARCHIVE_READ_FAILED")?;
     let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(file));
     let mut total = 0u64;
@@ -122,6 +134,7 @@ fn unpack(archive: &Path, destination: &Path) -> Result<(), String> {
         .map_err(|_| "JAVA_ARCHIVE_INVALID")?
         .enumerate()
     {
+        job.check()?;
         if index > 20000 {
             return Err("JAVA_ARCHIVE_TOO_LARGE".into());
         }
@@ -160,6 +173,7 @@ fn unpack(archive: &Path, destination: &Path) -> Result<(), String> {
     Ok(())
 }
 pub async fn ensure(root: &Path, custom: &str, major: u32, job: &Job) -> Result<PathBuf, String> {
+    let platform = Platform::current()?;
     job.check()?;
     job.report("java", 0, 0);
     if !custom.trim().is_empty() {
@@ -167,21 +181,33 @@ pub async fn ensure(root: &Path, custom: &str, major: u32, job: &Job) -> Result<
         verify(&path, major).await?;
         return Ok(path);
     }
-    let home = Command::new("/usr/libexec/java_home")
-        .args(["-v", &major.to_string()])
-        .kill_on_drop(true)
-        .output()
-        .await;
-    if let Ok(output) = home {
-        if output.status.success() {
-            let path =
-                PathBuf::from(String::from_utf8_lossy(&output.stdout).trim()).join("bin/java");
-            if verify(&path, major).await.is_ok() {
-                return Ok(path);
+    if let Some(home) = std::env::var_os("JAVA_HOME") {
+        let path = PathBuf::from(home).join(if platform.os == "windows" {
+            "bin/java.exe"
+        } else {
+            "bin/java"
+        });
+        if verify(&path, major).await.is_ok() {
+            return Ok(path);
+        }
+    }
+    if platform.os == "osx" {
+        let home = command("/usr/libexec/java_home")
+            .args(["-v", &major.to_string()])
+            .kill_on_drop(true)
+            .output()
+            .await;
+        if let Ok(output) = home {
+            if output.status.success() {
+                let path =
+                    PathBuf::from(String::from_utf8_lossy(&output.stdout).trim()).join("bin/java");
+                if verify(&path, major).await.is_ok() {
+                    return Ok(path);
+                }
             }
         }
     }
-    let destination = root.join(format!("temurin-{major}-aarch64"));
+    let destination = root.join(format!("temurin-{major}-{}", platform.key()));
     if let Some(java) = java_in(&destination, 0) {
         if verify(&java, major).await.is_ok() {
             return Ok(java);
@@ -190,8 +216,8 @@ pub async fn ensure(root: &Path, custom: &str, major: u32, job: &Job) -> Result<
     if !matches!(major, 17 | 21 | 25) {
         return Err("JAVA_UNSUPPORTED_VERSION".into());
     }
-    let endpoint=format!("https://api.adoptium.net/v3/assets/latest/{major}/hotspot?architecture=aarch64&heap_size=normal&image_type=jre&jvm_impl=hotspot&os=mac&vendor=eclipse");
-    let reply = client()?
+    let endpoint=format!("https://api.adoptium.net/v3/assets/latest/{major}/hotspot?architecture={}&heap_size=normal&image_type=jre&jvm_impl=hotspot&os={}&vendor=eclipse", platform.adoptium_arch(), platform.adoptium_os());
+    let mut reply = client()?
         .get(endpoint)
         .send()
         .await
@@ -201,9 +227,13 @@ pub async fn ensure(root: &Path, custom: &str, major: u32, job: &Job) -> Result<
     if reply.content_length().is_some_and(|n| n > 1024 * 1024) {
         return Err("JAVA_CATALOG_INVALID".into());
     }
-    let data = reply.bytes().await.map_err(|_| "JAVA_CATALOG_NETWORK")?;
-    if data.len() > 1024 * 1024 {
-        return Err("JAVA_CATALOG_INVALID".into());
+    let mut data = Vec::new();
+    while let Some(chunk) = reply.chunk().await.map_err(|_| "JAVA_CATALOG_NETWORK")? {
+        job.check()?;
+        if data.len().saturating_add(chunk.len()) > 1024 * 1024 {
+            return Err("JAVA_CATALOG_INVALID".into());
+        }
+        data.extend_from_slice(&chunk);
     }
     let releases: Vec<Release> =
         serde_json::from_slice(&data).map_err(|_| "JAVA_CATALOG_INVALID")?;
@@ -214,6 +244,9 @@ pub async fn ensure(root: &Path, custom: &str, major: u32, job: &Job) -> Result<
         .package;
     let url = reqwest::Url::parse(&package.link).map_err(|_| "JAVA_UNTRUSTED_DOWNLOAD")?;
     if url.scheme() != "https"
+        || url.port_or_known_default() != Some(443)
+        || !url.username().is_empty()
+        || url.password().is_some()
         || url.host_str() != Some("github.com")
         || !url.path().starts_with(&format!(
             "/adoptium/temurin{major}-binaries/releases/download/"
@@ -225,6 +258,13 @@ pub async fn ensure(root: &Path, custom: &str, major: u32, job: &Job) -> Result<
     {
         return Err("JAVA_UNTRUSTED_DOWNLOAD".into());
     }
+    let is_zip = platform.os == "windows";
+    if !url
+        .path()
+        .ends_with(if is_zip { ".zip" } else { ".tar.gz" })
+    {
+        return Err("JAVA_UNTRUSTED_DOWNLOAD".into());
+    }
     let http = reqwest::Client::builder()
         .https_only(true)
         .timeout(Duration::from_secs(300))
@@ -233,6 +273,9 @@ pub async fn ensure(root: &Path, custom: &str, major: u32, job: &Job) -> Result<
                 return attempt.error("Too many redirects");
             }
             if attempt.url().scheme() == "https"
+                && attempt.url().port_or_known_default() == Some(443)
+                && attempt.url().username().is_empty()
+                && attempt.url().password().is_none()
                 && matches!(
                     attempt.url().host_str(),
                     Some(
@@ -252,7 +295,7 @@ pub async fn ensure(root: &Path, custom: &str, major: u32, job: &Job) -> Result<
     tokio::fs::create_dir_all(root)
         .await
         .map_err(|_| "JAVA_CREATE_DIRECTORY")?;
-    let archive = root.join(format!("temurin-{major}.tar.gz.part"));
+    let archive = root.join(format!("temurin-{major}-{}.part", platform.key()));
     let mut reply = http
         .get(url)
         .send()
@@ -292,7 +335,8 @@ pub async fn ensure(root: &Path, custom: &str, major: u32, job: &Job) -> Result<
         .map_err(|_| "JAVA_CREATE_DIRECTORY")?;
     let input = archive.clone();
     let output = staging.clone();
-    let result = tokio::task::spawn_blocking(move || unpack(&input, &output))
+    let extract_job = job.clone();
+    let result = tokio::task::spawn_blocking(move || unpack(&input, &output, is_zip, &extract_job))
         .await
         .map_err(|_| "JAVA_EXTRACT_FAILED")?;
     if let Err(error) = result {
@@ -307,9 +351,24 @@ pub async fn ensure(root: &Path, custom: &str, major: u32, job: &Job) -> Result<
             .await
             .map_err(|_| "JAVA_REPLACE_FAILED")?;
     }
-    tokio::fs::rename(&staging, &destination)
-        .await
-        .map_err(|_| "JAVA_REPLACE_FAILED")?;
+    // Windows can briefly retain executable/DLL handles after the version check.
+    // Retry promotion while keeping the verified staging directory intact.
+    let mut attempts = 0;
+    loop {
+        job.check()?;
+        match tokio::fs::rename(&staging, &destination).await {
+            Ok(()) => break,
+            Err(error)
+                if cfg!(windows)
+                    && attempts < 20
+                    && matches!(error.raw_os_error(), Some(5 | 32 | 33)) =>
+            {
+                attempts += 1;
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(_) => return Err("JAVA_REPLACE_FAILED".into()),
+        }
+    }
     let _ = tokio::fs::remove_file(&archive).await;
     java_in(&destination, 0).ok_or_else(|| "JAVA_EXECUTABLE_NOT_FOUND".into())
 }
